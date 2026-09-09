@@ -114,10 +114,50 @@ class BucketControllerTest {
     @Test
     @WithMockUser(roles = "S3_CLIENT")
     void deleteBucket_notFound_returns404() throws Exception {
-        when(driveService.deleteItem("ghost-bucket", null)).thenReturn(false);
+        when(driveService.deleteItem("ghost-bucket", null))
+            .thenThrow(org.springframework.web.reactive.function.client.WebClientResponseException.NotFound.create(
+                404, "Not Found", null, null, null));
+        // bucket missing → listing 404 propagates as NoSuchBucket
+        when(driveService.listBucketChildren("ghost-bucket", ""))
+            .thenThrow(org.springframework.web.reactive.function.client.WebClientResponseException.NotFound.create(
+                404, "Not Found", null, null, null));
 
         mvc.perform(delete("/ghost-bucket"))
-            .andExpect(status().isNotFound());
+            .andExpect(status().isNotFound())
+            .andExpect(xpath("/Error/Code").string("NoSuchBucket"));
+    }
+
+    @Test
+    @WithMockUser(roles = "S3_CLIENT")
+    void deleteBucket_notEmpty_returns409() throws Exception {
+        DriveItem child = new DriveItem();
+        child.setId("id1");
+        child.setName("leftover.txt");
+        child.setFile(new Object());
+        DriveItemList children = new DriveItemList();
+        children.setItems(java.util.List.of(child));
+        when(driveService.listBucketChildren("old-bucket", "")).thenReturn(children);
+
+        mvc.perform(delete("/old-bucket"))
+            .andExpect(status().isConflict())
+            .andExpect(xpath("/Error/Code").string("BucketNotEmpty"));
+    }
+
+    // ── DeleteObjects (batch) ─────────────────────────────────────────────────
+
+    @Test
+    @WithMockUser(roles = "S3_CLIENT")
+    void deleteObjects_deletesEachKey() throws Exception {
+        when(driveService.deleteItem(eq("my-bucket"), anyString())).thenReturn(true);
+
+        mvc.perform(post("/my-bucket").param("delete", "")
+                .contentType(MediaType.APPLICATION_XML)
+                .content("<Delete><Object><Key>a.txt</Key></Object><Object><Key>b.txt</Key></Object></Delete>"))
+            .andExpect(status().isOk())
+            .andExpect(xpath("count(/DeleteResult/Deleted/Key)").number(2.0));
+
+        verify(driveService).deleteItem("my-bucket", "a.txt");
+        verify(driveService).deleteItem("my-bucket", "b.txt");
     }
 
     // ── HeadBucket ────────────────────────────────────────────────────────────

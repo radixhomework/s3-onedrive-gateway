@@ -4,17 +4,21 @@ import com.fasterxml.jackson.annotation.JsonIgnoreProperties;
 import com.fasterxml.jackson.annotation.JsonProperty;
 import io.github.radixhomework.s3onedrive.auth.OneDriveTokenService;
 import io.github.radixhomework.s3onedrive.config.OneDriveProperties;
+import io.github.radixhomework.s3onedrive.util.KeySanitizer;
 import lombok.Data;
 import lombok.extern.slf4j.Slf4j;
 import org.springframework.core.io.buffer.DataBuffer;
 import org.springframework.http.HttpStatusCode;
 import org.springframework.http.MediaType;
+import org.springframework.http.ResponseEntity;
 import org.springframework.stereotype.Service;
 import org.springframework.web.reactive.function.client.WebClient;
 import org.springframework.web.reactive.function.client.WebClientResponseException;
 import reactor.core.publisher.Flux;
 import reactor.core.publisher.Mono;
+import reactor.util.retry.Retry;
 
+import java.time.Duration;
 import java.util.List;
 import java.util.Map;
 
@@ -24,12 +28,19 @@ import java.util.Map;
  * Path convention:
  *   OneDrive path  =  /{rootFolder}/{bucket}/{objectKey}
  *
+ * S3 keys are mapped onto OneDrive-safe names by {@link KeySanitizer}.
  * All methods are synchronous (block()) because the S3 controller layer
- * uses traditional Servlet I/O. Switch to reactive if desired.
+ * uses traditional Servlet I/O.
  */
 @Slf4j
 @Service
 public class OneDriveService {
+
+    /** Graph children pages fetched per folder (999 = documented max page size). */
+    private static final int PAGE_SIZE = 999;
+
+    /** Safety cap on pagination follow-ups per listing call. */
+    private static final int MAX_PAGES = 100;
 
     private final WebClient graphClient;
     private final OneDriveTokenService tokenService;
@@ -53,13 +64,13 @@ public class OneDriveService {
         return "/me/drive/root";
     }
 
-    /** Builds a Graph item path like  /me/drive/root:/s3-gateway/bucket/key: */
+    /** Builds a Graph item path like  /me/drive/root:/s3/bucket/key: */
     private String itemPath(String... segments) {
         StringBuilder sb = new StringBuilder(driveRoot()).append(":");
         sb.append("/").append(properties.getRootFolder());
         for (String seg : segments) {
             if (seg != null && !seg.isBlank()) {
-                sb.append("/").append(seg.replace("//", "/"));
+                sb.append("/").append(KeySanitizer.sanitize(seg.replace("//", "/")));
             }
         }
         sb.append(":");
@@ -70,6 +81,21 @@ public class OneDriveService {
         return "Bearer " + tokenService.getBearerToken();
     }
 
+    /** Retries transient Graph throttling / availability errors with exponential backoff. */
+    private <T> Mono<T> withRetry(Mono<T> mono) {
+        return mono.retryWhen(Retry.backoff(4, Duration.ofMillis(500))
+            .maxBackoff(Duration.ofSeconds(20))
+            .filter(this::isRetryable));
+    }
+
+    private boolean isRetryable(Throwable t) {
+        if (t instanceof WebClientResponseException wce) {
+            int status = wce.getStatusCode().value();
+            return status == 429 || status == 503 || status == 504;
+        }
+        return false;
+    }
+
     // ── Folder / Bucket operations ────────────────────────────────────────────
 
     /**
@@ -78,30 +104,41 @@ public class OneDriveService {
      */
     public DriveItemList listRootChildren() {
         String url = driveRoot() + ":/" + properties.getRootFolder() + ":/children"
-            + "?$select=name,id,createdDateTime,lastModifiedDateTime,folder";
+            + "?$select=name,id,createdDateTime,lastModifiedDateTime,folder&$top=" + PAGE_SIZE;
 
-        return graphClient.get()
+        return (DriveItemList) withRetry(graphClient.get()
             .uri(url)
             .header("Authorization", bearer())
             .retrieve()
-            .bodyToMono(DriveItemList.class)
-            .block();
+            .bodyToMono(DriveItemList.class)).block();
     }
 
     /**
-     * Lists items directly under bucket (non-recursive, page-aware via nextLink).
+     * Lists every item under {@code bucket/folder} (non-recursive), following
+     * Graph @odata.nextLink pagination until the folder is exhausted.
+     *
+     * @param folder relative folder path inside the bucket; empty = bucket root
      */
-    public DriveItemList listBucketChildren(String bucket, String prefix, String delimiter) {
-        String base = itemPath(bucket) + "/children"
+    public DriveItemList listBucketChildren(String bucket, String folder) {
+        String base = itemPath(bucket, folder) + "/children"
             + "?$select=name,id,size,createdDateTime,lastModifiedDateTime,file,folder"
-            + "&$top=1000";
+            + "&$top=" + PAGE_SIZE;
 
-        return graphClient.get()
-            .uri(base)
-            .header("Authorization", bearer())
-            .retrieve()
-            .bodyToMono(DriveItemList.class)
-            .block();
+        DriveItemList merged = new DriveItemList();
+        merged.setItems(new java.util.ArrayList<>());
+
+        String url = base;
+        for (int page = 0; url != null && page < MAX_PAGES; page++) {
+            DriveItemList result = (DriveItemList) withRetry(graphClient.get()
+                .uri(url)
+                .header("Authorization", bearer())
+                .retrieve()
+                .bodyToMono(DriveItemList.class)).block();
+            if (result == null) break;
+            if (result.getItems() != null) merged.getItems().addAll(result.getItems());
+            url = result.getNextLink();
+        }
+        return merged;
     }
 
     /**
@@ -121,20 +158,19 @@ public class OneDriveService {
 
         String url = parentPath + "/children";
         Map<String, Object> body = Map.of(
-            "name", folderName,
+            "name", KeySanitizer.sanitize(folderName),
             "folder", Map.of(),
             "@microsoft.graph.conflictBehavior", "fail"
         );
 
-        graphClient.post()
+        ((Mono<Void>) withRetry(graphClient.post()
             .uri(url)
             .header("Authorization", bearer())
             .contentType(MediaType.APPLICATION_JSON)
             .bodyValue(body)
             .retrieve()
             .onStatus(status -> status.value() == 409, resp -> Mono.empty()) // ignore conflict
-            .bodyToMono(Void.class)
-            .block();
+            .bodyToMono(Void.class))).block();
 
         log.debug("Folder created/exists: {}", url);
     }
@@ -146,12 +182,11 @@ public class OneDriveService {
     public boolean deleteItem(String bucket, String key) {
         String url = itemPath(bucket, key);
         try {
-            graphClient.delete()
+            ((Mono<Void>) withRetry(graphClient.delete()
                 .uri(url)
                 .header("Authorization", bearer())
                 .retrieve()
-                .bodyToMono(Void.class)
-                .block();
+                .bodyToMono(Void.class))).block();
             return true;
         } catch (WebClientResponseException e) {
             if (e.getStatusCode().value() == 404) return false;
@@ -162,16 +197,23 @@ public class OneDriveService {
     // ── Object operations ─────────────────────────────────────────────────────
 
     /**
-     * Downloads a file and returns a streaming Flux of DataBuffers.
-     * The caller is responsible for releasing the buffers.
+     * Downloads an item, honouring an optional HTTP Range header (single range),
+     * and returns the response entity with a streaming Flux body.
      */
+    @SuppressWarnings("unchecked")
+    public ResponseEntity<Flux<DataBuffer>> downloadItem(String bucket, String key, String range) {
+        WebClient.RequestHeadersSpec<?> spec = graphClient.get()
+            .uri(itemPath(bucket, key) + "/content")
+            .header("Authorization", bearer());
+        if (range != null && !range.isBlank()) {
+            spec = (WebClient.RequestHeadersSpec<?>) spec.header("Range", range);
+        }
+        return (ResponseEntity<Flux<DataBuffer>>) withRetry(spec.retrieve().toEntityFlux(DataBuffer.class)).block();
+    }
+
+    /** Full (non-range) streaming download. */
     public Flux<DataBuffer> downloadItem(String bucket, String key) {
-        String url = itemPath(bucket, key) + "/content";
-        return graphClient.get()
-            .uri(url)
-            .header("Authorization", bearer())
-            .retrieve()
-            .bodyToFlux(DataBuffer.class);
+        return downloadItem(bucket, key, null).getBody();
     }
 
     /**
@@ -181,12 +223,11 @@ public class OneDriveService {
         String url = itemPath(bucket, key)
             + "?$select=id,name,size,eTag,createdDateTime,lastModifiedDateTime,file";
         try {
-            return graphClient.get()
+            return (DriveItem) withRetry(graphClient.get()
                 .uri(url)
                 .header("Authorization", bearer())
                 .retrieve()
-                .bodyToMono(DriveItem.class)
-                .block();
+                .bodyToMono(DriveItem.class)).block();
         } catch (WebClientResponseException e) {
             if (e.getStatusCode().value() == 404) return null;
             throw e;
@@ -199,16 +240,15 @@ public class OneDriveService {
     public DriveItem uploadSmall(String bucket, String key,
                                  byte[] data, String contentType) {
         String url = itemPath(bucket, key) + "/content";
-        return graphClient.put()
+        return (DriveItem) withRetry(graphClient.put()
             .uri(url)
             .header("Authorization", bearer())
-            .contentType(contentType != null
+            .contentType(contentType != null && !contentType.isBlank()
                 ? MediaType.parseMediaType(contentType)
                 : MediaType.APPLICATION_OCTET_STREAM)
             .bodyValue(data)
             .retrieve()
-            .bodyToMono(DriveItem.class)
-            .block();
+            .bodyToMono(DriveItem.class)).block();
     }
 
     /**
@@ -226,48 +266,45 @@ public class OneDriveService {
 
         Map<String, Object> body = Map.of("item", item);
 
-        UploadSession session = graphClient.post()
+        UploadSession session = (UploadSession) withRetry(graphClient.post()
             .uri(url)
             .header("Authorization", bearer())
             .contentType(MediaType.APPLICATION_JSON)
             .bodyValue(body)
             .retrieve()
-            .bodyToMono(UploadSession.class)
-            .block();
+            .bodyToMono(UploadSession.class)).block();
 
         if (session == null || session.uploadUrl == null) {
             throw new IllegalStateException("Failed to create upload session for " + key);
         }
-        log.debug("Upload session created for {}/{}: {}", bucket, key, session.uploadUrl);
+        log.debug("Upload session created for {}/{}", bucket, key);
         return session.uploadUrl;
     }
 
     /**
-     * Uploads a single part to a resumable upload session URL.
+     * Uploads a single chunk to a resumable upload session URL.
      *
      * @param uploadUrl   The URL returned by createUploadSession
-     * @param partData    Bytes of this part
-     * @param rangeStart  Byte offset of the first byte in partData
-     * @param totalSize   Total file size (-1 if unknown / streaming)
+     * @param chunkData   Bytes of this chunk (length = chunkData.length)
+     * @param rangeStart  Byte offset of the first byte in chunkData
+     * @param totalSize   Total file size
      */
-    public void uploadPart(String uploadUrl, byte[] partData,
+    public void uploadPart(String uploadUrl, byte[] chunkData,
                            long rangeStart, long totalSize) {
-        long rangeEnd = rangeStart + partData.length - 1;
-        String contentRange = "bytes " + rangeStart + "-" + rangeEnd
-            + "/" + (totalSize > 0 ? totalSize : "*");
+        long rangeEnd = rangeStart + chunkData.length - 1;
+        String contentRange = "bytes " + rangeStart + "-" + rangeEnd + "/" + totalSize;
 
-        graphClient.put()
+        ((Mono<Void>) withRetry(graphClient.put()
             .uri(uploadUrl)
             .header("Content-Range", contentRange)
             .contentType(MediaType.APPLICATION_OCTET_STREAM)
-            .bodyValue(partData)
+            .bodyValue(chunkData)
             .retrieve()
             // 200 = complete, 202 = more parts expected, both are OK
             .onStatus(HttpStatusCode::is4xxClientError, resp ->
                 resp.bodyToMono(String.class).flatMap(body ->
                     Mono.error(new IllegalStateException("Upload part failed: " + body))))
-            .bodyToMono(Void.class)
-            .block();
+            .bodyToMono(Void.class))).block();
 
         log.debug("Uploaded range {}", contentRange);
     }

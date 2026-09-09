@@ -1,5 +1,6 @@
 package io.github.radixhomework.s3onedrive.controller;
 
+import io.github.radixhomework.s3onedrive.exception.S3Exception;
 import io.github.radixhomework.s3onedrive.model.S3Xml;
 import io.github.radixhomework.s3onedrive.util.XmlUtil;
 import jakarta.servlet.http.HttpServletResponse;
@@ -15,6 +16,12 @@ import java.util.UUID;
 @Slf4j
 @RestControllerAdvice
 public class GlobalExceptionHandler {
+
+    @ExceptionHandler(S3Exception.class)
+    public void handleS3Error(S3Exception ex, HttpServletResponse response) throws IOException {
+        log.debug("S3 error {}: {}", ex.getCode(), ex.getMessage());
+        sendError(response, ex.getStatus(), ex.getCode(), ex.getMessage());
+    }
 
     @ExceptionHandler(WebClientResponseException.class)
     public void handleGraphError(WebClientResponseException ex,

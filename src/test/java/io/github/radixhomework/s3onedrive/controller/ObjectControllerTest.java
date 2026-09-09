@@ -14,9 +14,11 @@ import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.boot.webmvc.test.autoconfigure.AutoConfigureMockMvc;
 import org.springframework.boot.test.context.SpringBootTest;
 import org.springframework.test.context.bean.override.mockito.MockitoBean;
+import org.springframework.core.io.buffer.DataBuffer;
 import org.springframework.core.io.buffer.DataBufferFactory;
 import org.springframework.core.io.buffer.DefaultDataBufferFactory;
 import org.springframework.http.MediaType;
+import org.springframework.http.ResponseEntity;
 import org.springframework.security.test.context.support.WithMockUser;
 import org.springframework.test.web.servlet.MockMvc;
 import reactor.core.publisher.Flux;
@@ -57,22 +59,32 @@ class ObjectControllerTest {
 
     private static final DataBufferFactory bufferFactory = new DefaultDataBufferFactory();
 
+    // ── Helpers ───────────────────────────────────────────────────────────────
+
+    private static DriveItem fileItem(String name, long size, String etag) {
+        DriveItem item = new DriveItem();
+        item.setId("id-" + name);
+        item.setName(name);
+        item.setSize(size);
+        item.setLastModifiedDateTime("2024-01-01T00:00:00Z");
+        item.setETag(etag);
+        item.setFile(new Object());
+        return item;
+    }
+
+    private static ResponseEntity<Flux<DataBuffer>> bodyEntity(String content) {
+        return ResponseEntity.ok(Flux.just(bufferFactory.wrap(content.getBytes())));
+    }
+
     // ── ListObjects ───────────────────────────────────────────────────────────
 
     @Test
     @WithMockUser(roles = "S3_CLIENT")
     void listObjects_returnsXml() throws Exception {
-        DriveItem file = new DriveItem();
-        file.setId("id1");
-        file.setName("readme.txt");
-        file.setSize(42L);
-        file.setLastModifiedDateTime("2024-01-01T00:00:00Z");
-        file.setFile(new Object());
-
         DriveItemList list = new DriveItemList();
-        list.setItems(List.of(file));
+        list.setItems(List.of(fileItem("readme.txt", 42L, "etag1")));
 
-        when(driveService.listBucketChildren(eq("my-bucket"), any(), any()))
+        when(driveService.listBucketChildren(eq("my-bucket"), any()))
             .thenReturn(list);
 
         mvc.perform(get("/my-bucket")
@@ -82,25 +94,94 @@ class ObjectControllerTest {
             .andExpect(xpath("/ListBucketResult/Contents/Key").string("readme.txt"));
     }
 
+    @Test
+    @WithMockUser(roles = "S3_CLIENT")
+    void listObjects_withDelimiter_collapsesFolders() throws Exception {
+        DriveItem doc = new DriveItem();
+        doc.setId("dir-docs");
+        doc.setName("docs");
+        doc.setFolder(new Object());
+
+        DriveItemList list = new DriveItemList();
+        list.setItems(List.of(fileItem("a.txt", 1L, "etag1"), doc));
+
+        when(driveService.listBucketChildren(eq("my-bucket"), any()))
+            .thenReturn(list);
+
+        mvc.perform(get("/my-bucket").param("delimiter", "/"))
+            .andExpect(status().isOk())
+            .andExpect(xpath("/ListBucketResult/Contents/Key").string("a.txt"))
+            .andExpect(xpath("/ListBucketResult/CommonPrefixes/Prefix").string("docs/"));
+    }
+
+    @Test
+    @WithMockUser(roles = "S3_CLIENT")
+    void listObjects_v2_reportsKeyCount() throws Exception {
+        DriveItemList list = new DriveItemList();
+        list.setItems(List.of(fileItem("a.txt", 1L, "etag1")));
+
+        when(driveService.listBucketChildren(eq("my-bucket"), any()))
+            .thenReturn(list);
+
+        mvc.perform(get("/my-bucket").param("list-type", "2"))
+            .andExpect(status().isOk())
+            .andExpect(xpath("/ListBucketResult/KeyCount").string("1"));
+    }
+
     // ── GetObject ─────────────────────────────────────────────────────────────
 
     @Test
     @WithMockUser(roles = "S3_CLIENT")
     void getObject_streamsContent() throws Exception {
-        DriveItem meta = new DriveItem();
-        meta.setId("id1");
-        meta.setName("hello.txt");
-        meta.setSize(5L);
-        meta.setFile(new Object());
+        DriveItem meta = fileItem("hello.txt", 5L, "etag-hello");
 
         when(driveService.getItemMetadata("my-bucket", "hello.txt")).thenReturn(meta);
-        when(driveService.downloadItem("my-bucket", "hello.txt")).thenReturn(
-            Flux.just(bufferFactory.wrap("hello".getBytes()))
-        );
+        when(driveService.downloadItem(eq("my-bucket"), eq("hello.txt"), isNull()))
+            .thenReturn(bodyEntity("hello"));
 
         mvc.perform(get("/my-bucket/hello.txt"))
             .andExpect(status().isOk())
             .andExpect(content().bytes("hello".getBytes()));
+    }
+
+    @Test
+    @WithMockUser(roles = "S3_CLIENT")
+    void getObject_withRange_returns206() throws Exception {
+        DriveItem meta = fileItem("big.bin", 100L, "etag-big");
+
+        when(driveService.getItemMetadata("my-bucket", "big.bin")).thenReturn(meta);
+        ResponseEntity<Flux<DataBuffer>> partial = ResponseEntity
+            .status(206)
+            .header("Content-Range", "bytes 0-9/100")
+            .body(Flux.just(bufferFactory.wrap("0123456789".getBytes())));
+        when(driveService.downloadItem("my-bucket", "big.bin", "bytes=0-9")).thenReturn(partial);
+
+        mvc.perform(get("/my-bucket/big.bin").header("Range", "bytes=0-9"))
+            .andExpect(status().isPartialContent())
+            .andExpect(header().string("Content-Range", "bytes 0-9/100"))
+            .andExpect(content().bytes("0123456789".getBytes()));
+    }
+
+    @Test
+    @WithMockUser(roles = "S3_CLIENT")
+    void getObject_ifNoneMatch_returns304() throws Exception {
+        DriveItem meta = fileItem("cached.txt", 5L, "\"abc123\"");
+
+        when(driveService.getItemMetadata("my-bucket", "cached.txt")).thenReturn(meta);
+
+        mvc.perform(get("/my-bucket/cached.txt").header("If-None-Match", "\"abc123\""))
+            .andExpect(status().isNotModified());
+    }
+
+    @Test
+    @WithMockUser(roles = "S3_CLIENT")
+    void getObject_ifMatchMismatch_returns412() throws Exception {
+        DriveItem meta = fileItem("moved.txt", 5L, "\"aaa\"");
+
+        when(driveService.getItemMetadata("my-bucket", "moved.txt")).thenReturn(meta);
+
+        mvc.perform(get("/my-bucket/moved.txt").header("If-Match", "\"bbb\""))
+            .andExpect(status().isPreconditionFailed());
     }
 
     @Test
@@ -118,8 +199,7 @@ class ObjectControllerTest {
     @Test
     @WithMockUser(roles = "S3_CLIENT")
     void putObject_smallFile_callsUploadSmall() throws Exception {
-        DriveItem result = new DriveItem();
-        result.setETag("\"abc123\"");
+        DriveItem result = fileItem("file.txt", 5L, "\"abc123\"");
         when(driveService.uploadSmall(eq("my-bucket"), eq("file.txt"), any(), any()))
             .thenReturn(result);
 
@@ -130,6 +210,29 @@ class ObjectControllerTest {
             .andExpect(header().string("ETag", "\"abc123\""));
 
         verify(driveService).uploadSmall(eq("my-bucket"), eq("file.txt"), any(), any());
+    }
+
+    // ── CopyObject ────────────────────────────────────────────────────────────
+
+    @Test
+    @WithMockUser(roles = "S3_CLIENT")
+    void putObject_withCopySource_copiesObject() throws Exception {
+        DriveItem source = fileItem("orig.txt", 5L, "\"src-etag\"");
+        when(driveService.getItemMetadata("src-bucket", "orig.txt")).thenReturn(source);
+        when(driveService.downloadItem(eq("src-bucket"), eq("orig.txt"), isNull()))
+            .thenReturn(bodyEntity("hello"));
+
+        DriveItem copied = fileItem("copy.txt", 5L, "\"copy-etag\"");
+        when(driveService.uploadSmall(eq("dst-bucket"), eq("copy.txt"), any(), any()))
+            .thenReturn(copied);
+
+        mvc.perform(put("/dst-bucket/copy.txt")
+                .header("x-amz-copy-source", "src-bucket/orig.txt")
+                .contentType(MediaType.APPLICATION_OCTET_STREAM))
+            .andExpect(status().isOk())
+            .andExpect(xpath("/CopyObjectResult/ETag").string("\"copy-etag\""));
+
+        verify(driveService).uploadSmall(eq("dst-bucket"), eq("copy.txt"), any(), any());
     }
 
     // ── DeleteObject ──────────────────────────────────────────────────────────
@@ -148,12 +251,8 @@ class ObjectControllerTest {
     @Test
     @WithMockUser(roles = "S3_CLIENT")
     void headObject_existingFile_returns200() throws Exception {
-        DriveItem meta = new DriveItem();
-        meta.setId("id1");
-        meta.setSize(100L);
-        meta.setFile(new Object());
-
-        when(driveService.getItemMetadata("my-bucket", "file.txt")).thenReturn(meta);
+        when(driveService.getItemMetadata("my-bucket", "file.txt"))
+            .thenReturn(fileItem("file.txt", 100L, "etag1"));
 
         mvc.perform(head("/my-bucket/file.txt"))
             .andExpect(status().isOk());

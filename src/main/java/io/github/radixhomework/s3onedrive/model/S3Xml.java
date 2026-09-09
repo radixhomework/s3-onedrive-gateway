@@ -67,8 +67,23 @@ public final class S3Xml {
         private String delimiter;
         @JacksonXmlProperty(localName = "MaxKeys")
         private int maxKeys;
+        @JacksonXmlProperty(localName = "KeyCount")
+        private Integer keyCount;
+        @JacksonXmlProperty(localName = "EncodingType")
+        private String encodingType;
         @JacksonXmlProperty(localName = "IsTruncated")
         private boolean isTruncated;
+
+        @JacksonXmlProperty(localName = "Marker")
+        private String marker;
+        @JacksonXmlProperty(localName = "NextMarker")
+        private String nextMarker;
+        @JacksonXmlProperty(localName = "ContinuationToken")
+        private String continuationToken;
+        @JacksonXmlProperty(localName = "NextContinuationToken")
+        private String nextContinuationToken;
+        @JacksonXmlProperty(localName = "StartAfter")
+        private String startAfter;
 
         @JacksonXmlElementWrapper(useWrapping = false)
         @JacksonXmlProperty(localName = "Contents")
@@ -145,6 +160,65 @@ public final class S3Xml {
         private int partNumber;
         @JacksonXmlProperty(localName = "ETag")
         private String eTag;
+    }
+
+    // ── CopyObjectResult ──────────────────────────────────────────────────────
+
+    @Data @Builder @NoArgsConstructor @AllArgsConstructor
+    @JacksonXmlRootElement(localName = "CopyObjectResult",
+        namespace = "http://s3.amazonaws.com/doc/2006-03-01/")
+    public static class CopyObjectResult {
+        @JacksonXmlProperty(localName = "ETag")
+        private String eTag;
+        @JacksonXmlProperty(localName = "LastModified")
+        private String lastModified;
+    }
+
+    // ── DeleteObjects (batch) ─────────────────────────────────────────────────
+
+    @Data @NoArgsConstructor @AllArgsConstructor
+    @JacksonXmlRootElement(localName = "Delete")
+    public static class DeleteRequest {
+        @JacksonXmlElementWrapper(useWrapping = false)
+        @JacksonXmlProperty(localName = "Object")
+        private List<ObjectIdentifier> objects;
+        @JacksonXmlProperty(localName = "Quiet")
+        private Boolean quiet;
+    }
+
+    @Data @NoArgsConstructor @AllArgsConstructor
+    public static class ObjectIdentifier {
+        @JacksonXmlProperty(localName = "Key")
+        private String key;
+    }
+
+    @Data @Builder @NoArgsConstructor @AllArgsConstructor
+    @JacksonXmlRootElement(localName = "DeleteResult",
+        namespace = "http://s3.amazonaws.com/doc/2006-03-01/")
+    public static class DeleteResult {
+        @JacksonXmlElementWrapper(useWrapping = false)
+        @JacksonXmlProperty(localName = "Deleted")
+        private List<DeletedObject> deleted;
+
+        @JacksonXmlElementWrapper(useWrapping = false)
+        @JacksonXmlProperty(localName = "Error")
+        private List<DeleteError> errors;
+    }
+
+    @Data @Builder @NoArgsConstructor @AllArgsConstructor
+    public static class DeletedObject {
+        @JacksonXmlProperty(localName = "Key")
+        private String key;
+    }
+
+    @Data @Builder @NoArgsConstructor @AllArgsConstructor
+    public static class DeleteError {
+        @JacksonXmlProperty(localName = "Key")
+        private String key;
+        @JacksonXmlProperty(localName = "Code")
+        private String code;
+        @JacksonXmlProperty(localName = "Message")
+        private String message;
     }
 
     // ── Error ─────────────────────────────────────────────────────────────────

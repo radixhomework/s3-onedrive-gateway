@@ -87,7 +87,7 @@ class MultipartUploadStoreTest {
     @Test
     void storePartWithUnknownUploadIdThrows() {
         assertThatThrownBy(() -> store.storePart("bad-id", 1, new byte[0]))
-            .isInstanceOf(IllegalArgumentException.class)
+            .isInstanceOf(io.github.radixhomework.s3onedrive.exception.S3Exception.class)
             .hasMessageContaining("Unknown uploadId");
     }
 }
