@@ -1,0 +1,10 @@
+target/
+*.jar
+*.war
+.env
+*.iml
+.idea/
+.vscode/
+*.class
+/tmp/
+/s3-gateway-multipart/

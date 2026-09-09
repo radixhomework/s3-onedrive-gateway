@@ -1,0 +1,11 @@
+# Test overrides – no real Azure credentials needed
+onedrive:
+  tenant-id: test-tenant
+  client-id: test-client
+  client-secret: test-secret
+  root-folder: s3-gateway-test
+
+s3:
+  access-key: testkey
+  secret-key: testsecret
+  region: us-east-1

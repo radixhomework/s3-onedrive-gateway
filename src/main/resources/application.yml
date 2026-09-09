@@ -1,0 +1,45 @@
+# ─────────────────────────────────────────────
+#  S3 → OneDrive Gateway  –  application.yml
+# ─────────────────────────────────────────────
+
+server:
+  port: 8080
+
+# ── Microsoft Graph / Azure AD ──────────────
+onedrive:
+  tenant-id: ${AZURE_TENANT_ID}
+  client-id: ${AZURE_CLIENT_ID}
+  client-secret: ${AZURE_CLIENT_SECRET}
+  # Drive to use. Leave empty to use the app's own drive.
+  # Set to a SharePoint site-drive ID for shared drives.
+  drive-id: ${AZURE_DRIVE_ID:}
+  # Root folder inside the drive used as S3 namespace
+  root-folder: s3
+
+# ── Virtual S3 credentials (used by your S3 clients) ─
+s3:
+  access-key: ${S3_ACCESS_KEY:minioadmin}
+  secret-key: ${S3_SECRET_KEY:minioadmin}
+  region: ${S3_REGION:us-east-1}
+
+# ── Multipart upload ────────────────────────
+multipart:
+  # Temporary storage for in-progress multipart uploads
+  temp-dir: ${java.io.tmpdir}/s3-gateway-multipart
+  # Max part size accepted (bytes) – default 5 GiB
+  max-part-size: 5368709120
+
+# ── Spring internals ────────────────────────
+spring:
+  servlet:
+    multipart:
+      enabled: false          # We handle raw streams manually
+  cache:
+    type: caffeine
+    caffeine:
+      spec: maximumSize=100,expireAfterWrite=50m
+
+logging:
+  level:
+    io.github.radixhomework.s3onedrive: DEBUG
+    #org.springframework.security: WARN
