@@ -1,0 +1,34 @@
+version: "3.9"
+
+services:
+  gateway:
+    build: .
+    container_name: s3-onedrive-gateway
+    ports:
+      - "8080:8080"
+    environment:
+      # ── Azure AD / OneDrive ───────────────────
+      AZURE_TENANT_ID:     ${AZURE_TENANT_ID}
+      AZURE_CLIENT_ID:     ${AZURE_CLIENT_ID}
+      AZURE_CLIENT_SECRET: ${AZURE_CLIENT_SECRET}
+      AZURE_DRIVE_ID:      ${AZURE_DRIVE_ID:-}   # optional
+
+      # ── Virtual S3 credentials ────────────────
+      S3_ACCESS_KEY:  ${S3_ACCESS_KEY:-minioadmin}
+      S3_SECRET_KEY:  ${S3_SECRET_KEY:-minioadmin}
+      S3_REGION:      ${S3_REGION:-us-east-1}
+
+    volumes:
+      - multipart-tmp:/tmp/s3-gateway-multipart
+
+    restart: unless-stopped
+
+    healthcheck:
+      test: ["CMD", "wget", "-qO-", "http://localhost:8080/health"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 15s
+
+volumes:
+  multipart-tmp:
