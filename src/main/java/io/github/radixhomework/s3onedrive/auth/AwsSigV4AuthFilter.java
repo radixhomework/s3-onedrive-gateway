@@ -60,7 +60,8 @@ public class AwsSigV4AuthFilter extends OncePerRequestFilter {
                                     FilterChain filterChain) throws ServletException, IOException {
 
         // Health check – skip auth
-        if ("/health".equals(request.getRequestURI())) {
+        if ("/health".equals(request.getRequestURI())
+            || "/actuator/health".equals(request.getRequestURI())) {
             filterChain.doFilter(request, response);
             return;
         }

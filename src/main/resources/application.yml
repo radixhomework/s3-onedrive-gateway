@@ -39,6 +39,16 @@ spring:
     caffeine:
       spec: maximumSize=100,expireAfterWrite=50m
 
+# ── Ops / actuator ──────────────────────────
+management:
+  endpoints:
+    web:
+      exposure:
+        include: health,info,metrics
+  endpoint:
+    health:
+      show-details: never
+
 logging:
   level:
     io.github.radixhomework.s3onedrive: DEBUG

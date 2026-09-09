@@ -22,5 +22,5 @@ public class OneDriveProperties {
     private String driveId;
 
     /** Root folder name inside the drive used as the S3 namespace */
-    private String rootFolder = "s3-gateway";
+    private String rootFolder = "s3";
 }

@@ -25,8 +25,8 @@ public class SecurityConfig {
             .csrf(csrf -> csrf.disable())
             .sessionManagement(sm -> sm.sessionCreationPolicy(SessionCreationPolicy.STATELESS))
             .authorizeHttpRequests(auth -> auth
-                // Health-check endpoint (unauthenticated)
-                .requestMatchers("/health").permitAll()
+                // Health-check endpoints (unauthenticated)
+                .requestMatchers("/health", "/actuator/health").permitAll()
                 // All S3 paths require SigV4 authentication
                 .anyRequest().authenticated()
             )
